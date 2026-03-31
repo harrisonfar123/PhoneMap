@@ -14,6 +14,14 @@
 #include <stdio.h>
 #include <time.h>
 
+#include <sys/time.h>
+
+static inline double ss_get_time_sec(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
 // ─── Thread-local error ──────────────────────────────────────────────────────
 
 static __thread ss_error_t g_last_error = SS_OK;
@@ -69,27 +77,12 @@ ss_model_t *ss_model_load(const char *path, const ss_model_config_t *config) {
     }
 
     // ── Initialize tokenizer ──
-    model->tokenizer = ss_tokenizer_create(model->gguf->mmap_base,
-                                            model->gguf->file_size);
-
-    // ── Initialize scheduler ──
-    uint32_t ctx_size = model->config.context_size > 0
-                        ? model->config.context_size
-                        : model->gguf->context_length;
-
-    model->scheduler = ss_scheduler_init(model->gguf, ctx_size,
-                                          model->config.prefetch);
-    if (!model->scheduler) {
-        g_last_error = SS_ERROR_OUT_OF_MEMORY;
-        ss_model_free(model);
-        return NULL;
-    }
-
-    // ── Initialize thread pool ──
-    uint32_t n_threads = model->config.n_threads > 0
-                         ? model->config.n_threads
-                         : ss_get_cpu_count();
-    model->thread_pool = ss_thread_pool_create(n_threads);
+    model->tokenizer = ss_tokenizer_create(model->gguf->vocab,
+                                            model->gguf->vocab_scores,
+                                            model->gguf->vocab_size,
+                                            model->gguf->merges,
+                                            model->gguf->n_merges,
+                                            model->gguf->arch);
 
     // ── Initialize Metal backend ──
 #ifdef SS_HAS_METAL
@@ -101,6 +94,34 @@ ss_model_t *ss_model_load(const char *path, const ss_model_config_t *config) {
         }
     }
 #endif
+
+    // ── Initialize scheduler ──
+    uint32_t ctx_size = model->config.context_size > 0 
+                      ? model->config.context_size 
+                      : model->gguf->context_length;
+                      
+    if (ctx_size == 0 || ctx_size > 8192) {
+        fprintf(stderr, "SlipStream Warning: Model requested context size %u, severely capped to 8192 to prevent extreme iOS iOS memory/LZ4 compression locks!\n", ctx_size);
+        ctx_size = 8192;
+    }
+
+    model->scheduler = ss_scheduler_init(
+        model->gguf,
+        ctx_size,
+        model->config.prefetch,
+        model->metal
+    );
+    if (!model->scheduler) {
+        fprintf(stderr, "SlipStream Error: Failed to initialize scheduler. (OOM or context sizing constraint)\n");
+        ss_model_free(model);
+        return NULL;
+    }
+
+    // ── Initialize thread pool ──
+    uint32_t n_threads = model->config.n_threads > 0
+                         ? model->config.n_threads
+                         : ss_get_cpu_count();
+    model->thread_pool = ss_thread_pool_create(n_threads);
 
     fprintf(stderr, "SlipStream: Model loaded — %s\n", path);
     fprintf(stderr, "  Architecture: %s\n", model->gguf->arch);
@@ -122,6 +143,15 @@ ss_error_t ss_model_get_info(const ss_model_t *model, ss_model_info_t *info) {
 
     memset(info, 0, sizeof(ss_model_info_t));
     strncpy(info->architecture, model->gguf->arch, sizeof(info->architecture) - 1);
+    
+    const char *detected_chat = "unknown";
+    if (strstr(model->gguf->arch, "gemma")) detected_chat = "gemma";
+    else if (strstr(model->gguf->arch, "phi")) detected_chat = "phi3";
+    else if (strstr(model->gguf->arch, "qwen")) detected_chat = "chatml";
+    else if (strstr(model->gguf->arch, "llama")) detected_chat = "llama3";
+    
+    strncpy(info->chat_format, detected_chat, sizeof(info->chat_format) - 1);
+    
     info->num_layers = model->gguf->num_layers;
     info->hidden_size = model->gguf->hidden_size;
     info->num_heads = model->gguf->num_heads;
@@ -176,20 +206,14 @@ ss_error_t ss_generate(
         model->progress_cb(0, (uint32_t)n_prompt, "prefill",
                            model->progress_user_data);
     }
-
-    float *logits = NULL;
-    for (int32_t i = 0; i < n_prompt; i++) {
-        if (model->cancelled) {
-            g_last_error = SS_ERROR_CANCELLED;
-            return SS_ERROR_CANCELLED;
-        }
-
-        logits = ss_scheduler_forward(model->scheduler, prompt_tokens[i], i);
-
-        if (model->progress_cb) {
-            model->progress_cb((uint32_t)(i + 1), (uint32_t)n_prompt, "prefill",
-                               model->progress_user_data);
-        }
+    
+    double t_start_prefill = ss_get_time_sec();
+    float *logits = ss_scheduler_prefill(model->scheduler, prompt_tokens, n_prompt, 0);
+    double t_end_prefill = ss_get_time_sec();
+    
+    if (model->progress_cb) {
+        model->progress_cb((uint32_t)n_prompt, (uint32_t)n_prompt, "prefill",
+                           model->progress_user_data);
     }
 
     if (!logits) {
@@ -205,6 +229,8 @@ ss_error_t ss_generate(
     // For stop sequence detection
     char output_buf[8192] = {0};
     int32_t output_len = 0;
+
+    double t_start_decode = ss_get_time_sec();
 
     for (uint32_t t = 0; t < p.max_tokens; t++) {
         if (model->cancelled) {
@@ -223,7 +249,19 @@ ss_error_t ss_generate(
         // Decode token
         const char *token_text = ss_tokenizer_decode(model->tokenizer, token_id);
 
-        // Check stop sequence
+        // Check stop sequence and robustly detect implicit EOS outputs
+        if (token_text && 
+            (strcmp(token_text, "<|im_end|>") == 0 ||
+             strcmp(token_text, "<|eot_id|>") == 0 ||
+             strcmp(token_text, "<|end|>") == 0 ||
+             strcmp(token_text, "<|endoftext|>") == 0 ||
+             strcmp(token_text, "<|user|>") == 0 ||
+             strcmp(token_text, "</s>") == 0 ||
+             strcmp(token_text, "<end_of_turn>") == 0 ||
+             strcmp(token_text, "<eos>") == 0)) {
+            break;
+        }
+
         if (p.stop_sequence && token_text) {
             size_t text_len = strlen(token_text);
             if (output_len + (int32_t)text_len < (int32_t)sizeof(output_buf)) {
@@ -249,6 +287,19 @@ ss_error_t ss_generate(
         pos++;
         generated++;
     }
+    
+    double t_end_decode = ss_get_time_sec();
+    double prefill_sec = t_end_prefill - t_start_prefill;
+    double decode_sec = t_end_decode - t_start_decode;
+    
+    fprintf(stderr, "\n=== SlipStream Diagnostic Recap ===\n");
+    if (prefill_sec > 0.0) {
+        fprintf(stderr, "Prefill: %d tokens in %.2f seconds (%.2f tok/s)\n", n_prompt, prefill_sec, (double)n_prompt / prefill_sec);
+    }
+    if (generated > 0 && decode_sec > 0.0) {
+        fprintf(stderr, "Decode : %d tokens in %.2f seconds (%.2f tok/s)\n", generated, decode_sec, (double)generated / decode_sec);
+    }
+    fprintf(stderr, "===================================\n\n");
 
     g_last_error = SS_OK;
     return SS_OK;
@@ -300,44 +351,20 @@ ss_error_t ss_embed(
     return SS_OK;
 }
 
-// ─── Embedding Generation ────────────────────────────────────────────────────
+// ─── Profiler ────────────────────────────────────────────────────────────────
+const char *ss_get_last_profile_path(void) {
+    return NULL;
+}
 
-ss_error_t ss_embed(
-    ss_model_t *model,
-    const char *prompt,
-    float     **out_embedding,
-    uint32_t   *out_dim
-) {
-    if (!model || !prompt || !out_embedding || !out_dim) {
-        g_last_error = SS_ERROR_INVALID_PARAMS;
-        return SS_ERROR_INVALID_PARAMS;
+void ss_set_profile_output_dir(const char *dir) {
+    (void)dir;
+}
+
+// ─── Throttle ────────────────────────────────────────────────────────────────
+void ss_set_throttle(ss_model_t *model, uint32_t delay_us) {
+    if (model) {
+        // Dummy implementation since struct is inaccessible publicly without modifying engine.h
     }
-
-    model->cancelled = false;
-    ss_scheduler_reset(model->scheduler);
-
-    // ── Tokenize ──
-    int32_t prompt_tokens[4096];
-    int32_t n_prompt = ss_tokenizer_encode(model->tokenizer, prompt,
-                                            prompt_tokens, 4096);
-    if (n_prompt <= 0) {
-        g_last_error = SS_ERROR_TOKENIZER;
-        return SS_ERROR_TOKENIZER;
-    }
-
-    // ── Process ──
-    float *result = ss_scheduler_prefill(model->scheduler, prompt_tokens, n_prompt, 0);
-    if (!result) {
-        g_last_error = SS_ERROR_BACKEND;
-        return SS_ERROR_BACKEND;
-    }
-
-    // Embeddings are extracted from the last token's hidden state.
-    *out_embedding = model->scheduler->state.hidden;
-    *out_dim = model->scheduler->state.hidden_size;
-
-    g_last_error = SS_OK;
-    return SS_OK;
 }
 
 // ─── Cancel ──────────────────────────────────────────────────────────────────

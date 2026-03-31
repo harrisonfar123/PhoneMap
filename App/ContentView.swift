@@ -272,9 +272,12 @@ struct ContentView: View {
             }
             
             // Run Projection Clustering
-            await ProjectionLayer.clusterAndProject(items: &self.items, iterations: 150)
+            var localItems = self.items
+            await ProjectionLayer.clusterAndProject(items: &localItems, iterations: 150)
             
+            let finalItems = localItems
             DispatchQueue.main.async {
+                self.items = finalItems
                 self.db?.updateItemsCache(self.items)
                 withAnimation { 
                     self.isIndexing = false 

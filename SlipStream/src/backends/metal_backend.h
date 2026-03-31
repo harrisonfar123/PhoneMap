@@ -58,6 +58,18 @@ bool ss_metal_matvec_q4_K(ss_metal_ctx_t *ctx,
 bool ss_metal_should_use_gpu(int32_t rows, int32_t cols);
 
 /**
+ * Begin a Command Buffer parallel batch. Subsequent matrix multiplications
+ * will be enqueued into the unified buffer, deferring XPC synchronization.
+ */
+void ss_metal_begin_batch(ss_metal_ctx_t *ctx);
+
+/**
+ * End a Command Buffer batch, synchronously flushing all parallel pipelines 
+ * onto the GPU compute grids and waiting for their unified completion.
+ */
+void ss_metal_end_batch(ss_metal_ctx_t *ctx);
+
+/**
  * Free Metal context.
  */
 void ss_metal_free(ss_metal_ctx_t *ctx);

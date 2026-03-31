@@ -65,6 +65,7 @@ typedef enum {
 typedef struct {
     char         model_name[256];
     char         architecture[64];
+    char         chat_format[64];
     uint32_t     num_layers;
     uint32_t     hidden_size;
     uint32_t     num_heads;
@@ -171,6 +172,16 @@ ss_error_t ss_model_get_info(const ss_model_t *model, ss_model_info_t *info);
  */
 void ss_model_free(ss_model_t *model);
 
+// ─── Throttle ────────────────────────────────────────────────────────────────
+void ss_set_throttle(ss_model_t *model, uint32_t delay_us);
+
+// ─── Storage Memory ──────────────────────────────────────────────────────────
+uint64_t ss_get_memory_usage(void);
+
+// ─── Profiling ───────────────────────────────────────────────────────────────
+const char *ss_get_last_profile_path(void);
+void ss_set_profile_output_dir(const char *dir);
+
 // ─── Text Generation ─────────────────────────────────────────────────────────
 
 /**
@@ -200,30 +211,18 @@ ss_error_t ss_generate(
     void                      *user_data
 );
 
-/**
- * Cancel an in-progress generation (thread-safe).
- */
-void ss_cancel(ss_model_t *model);
-
-// ─── Embedding Generation ──────────────────────────────────────────────────────
-
-/**
- * Generate a dense vector embedding for the input text.
- * The model must support embeddings (e.g., nomic-embed).
- * This will return a pointer to the internal hidden state representation.
- * 
- * @param model         Loaded model handle
- * @param prompt        Input text to embed
- * @param out_embedding Pointer to a float array that will receive the embedding
- * @param out_dim       Pointer to an integer receiving the vector dimension
- * @return              SS_OK on success, error code on failure
- */
+// ─── Embedding Generation ────────────────────────────────────────────────────
 ss_error_t ss_embed(
     ss_model_t *model,
     const char *prompt,
     float     **out_embedding,
     uint32_t   *out_dim
 );
+
+/**
+ * Cancel an in-progress generation (thread-safe).
+ */
+void ss_cancel(ss_model_t *model);
 
 // ─── Progress Monitoring ─────────────────────────────────────────────────────
 
@@ -269,6 +268,30 @@ ss_error_t ss_estimate_memory(
     uint32_t    context_size,
     uint64_t   *peak_memory
 );
+
+// ─── Hardware Device Info ────────────────────────────────────────────────────
+
+typedef struct {
+    char        device_model[64];
+    char        chip_name[64];
+    uint32_t    cpu_core_count;
+    uint32_t    perf_core_count;
+    uint32_t    efficiency_core_count;
+    uint32_t    gpu_core_count;
+    uint64_t    total_memory;
+    uint64_t    available_memory;
+    int32_t     thermal_state;
+} ss_device_info_t;
+
+/**
+ * Retrieve specialized hardware metrics for dynamic telemetry loading.
+ */
+ss_error_t ss_get_device_info(ss_device_info_t *info);
+
+/**
+ * Calculate active processing consumption asynchronously.
+ */
+double ss_get_cpu_usage(void);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import Contacts
+import SlipStream
 
 public class IngestionPipeline {
     private let db: PhoneMapDatabase

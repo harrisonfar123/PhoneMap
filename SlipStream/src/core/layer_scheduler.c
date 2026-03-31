@@ -53,8 +53,6 @@ static const ss_tensor_info_t *find_global_tensor(const ss_gguf_file_t *gguf,
 // Only 1 layer is uncompressed at a time. All others are LZ4-compressed.
 // Apple's native compression.h provides COMPRESSION_LZ4 for zero-dependency use.
 
-#include <compression.h>
-
 static bool kv_cache_init(ss_kv_cache_t *cache, int32_t num_layers,
                            int32_t max_seq_len, int32_t kv_dim) {
     cache->num_layers = num_layers;
@@ -62,138 +60,68 @@ static bool kv_cache_init(ss_kv_cache_t *cache, int32_t num_layers,
     cache->kv_dim = kv_dim;
     cache->seq_len = 0;
 
-    // Full flat arrays for backward-compatible kv_key_at/kv_value_at access
-    size_t total = (size_t)num_layers * max_seq_len * kv_dim;
-    cache->key_cache = (float *)calloc(total, sizeof(float));
-    cache->value_cache = (float *)calloc(total, sizeof(float));
-    if (!cache->key_cache || !cache->value_cache) return false;
-
-    // LZ4 compressed storage
-    cache->layer_bytes = (size_t)max_seq_len * kv_dim * sizeof(float);
-    // compression_encode_buffer needs a dst buffer; worst case is slightly larger than src
-    cache->compress_bound = cache->layer_bytes + (cache->layer_bytes / 255) + 64;
-    cache->active_layer = -1;
-    cache->lz4_enabled = true;
-
-    cache->compressed_keys = (uint8_t **)calloc(num_layers, sizeof(uint8_t *));
-    cache->compressed_values = (uint8_t **)calloc(num_layers, sizeof(uint8_t *));
-    cache->compressed_key_sizes = (size_t *)calloc(num_layers, sizeof(size_t));
-    cache->compressed_val_sizes = (size_t *)calloc(num_layers, sizeof(size_t));
+    size_t total_vectors = (size_t)num_layers * max_seq_len;
+    size_t total_int8 = total_vectors * kv_dim;
+    
+    cache->q_key_cache = (int8_t *)calloc(total_int8, sizeof(int8_t));
+    cache->q_val_cache = (int8_t *)calloc(total_int8, sizeof(int8_t));
+    cache->k_scales = (float *)calloc(total_vectors, sizeof(float));
+    cache->v_scales = (float *)calloc(total_vectors, sizeof(float));
+    
     cache->work_key = (float *)calloc(max_seq_len * kv_dim, sizeof(float));
     cache->work_value = (float *)calloc(max_seq_len * kv_dim, sizeof(float));
 
-    if (!cache->compressed_keys || !cache->compressed_values ||
-        !cache->compressed_key_sizes || !cache->compressed_val_sizes ||
+    if (!cache->q_key_cache || !cache->q_val_cache ||
+        !cache->k_scales || !cache->v_scales ||
         !cache->work_key || !cache->work_value) {
-        cache->lz4_enabled = false; // fallback to uncompressed
+        return false;
     }
 
     return true;
 }
 
-// Compress active layer's data back into compressed storage and free flat memory
-static void kv_compress_layer(ss_kv_cache_t *cache, int32_t layer) {
-    if (!cache->lz4_enabled || layer < 0 || layer >= cache->num_layers) return;
-
-    size_t lb = cache->layer_bytes;
-    float *k_src = cache->key_cache + (size_t)layer * cache->max_seq_len * cache->kv_dim;
-    float *v_src = cache->value_cache + (size_t)layer * cache->max_seq_len * cache->kv_dim;
-
-    // Allocate compressed buffers if needed
-    if (!cache->compressed_keys[layer]) {
-        cache->compressed_keys[layer] = (uint8_t *)malloc(cache->compress_bound);
-    }
-    if (!cache->compressed_values[layer]) {
-        cache->compressed_values[layer] = (uint8_t *)malloc(cache->compress_bound);
-    }
-
-    if (cache->compressed_keys[layer] && cache->compressed_values[layer]) {
-        size_t ck = compression_encode_buffer(
-            cache->compressed_keys[layer], cache->compress_bound,
-            (const uint8_t *)k_src, lb, NULL, COMPRESSION_LZ4);
-        size_t cv = compression_encode_buffer(
-            cache->compressed_values[layer], cache->compress_bound,
-            (const uint8_t *)v_src, lb, NULL, COMPRESSION_LZ4);
-
-        if (ck == 0 || cv == 0) {
-            // Compression failed (entropy too high). Leave flat arrays uncompressed.
-            cache->compressed_key_sizes[layer] = 0;
-            cache->compressed_val_sizes[layer] = 0;
-        } else {
-            cache->compressed_key_sizes[layer] = ck;
-            cache->compressed_val_sizes[layer] = cv;
-
-            // Only zero out the flat array if we successfully compressed the data
-            memset(k_src, 0, lb);
-            memset(v_src, 0, lb);
-        }
-    }
-}
-
-// Decompress a layer's data into the flat array for direct pointer access
-static void kv_decompress_layer(ss_kv_cache_t *cache, int32_t layer) {
-    if (!cache->lz4_enabled || layer < 0 || layer >= cache->num_layers) return;
-
-    float *k_dst = cache->key_cache + (size_t)layer * cache->max_seq_len * cache->kv_dim;
-    float *v_dst = cache->value_cache + (size_t)layer * cache->max_seq_len * cache->kv_dim;
-
-    if (cache->compressed_key_sizes[layer] > 0 && cache->compressed_keys[layer]) {
-        compression_decode_buffer(
-            (uint8_t *)k_dst, cache->layer_bytes,
-            cache->compressed_keys[layer], cache->compressed_key_sizes[layer],
-            NULL, COMPRESSION_LZ4);
-    }
-    if (cache->compressed_val_sizes[layer] > 0 && cache->compressed_values[layer]) {
-        compression_decode_buffer(
-            (uint8_t *)v_dst, cache->layer_bytes,
-            cache->compressed_values[layer], cache->compressed_val_sizes[layer],
-            NULL, COMPRESSION_LZ4);
-    }
-}
-
-// Activate a layer: compress previous active, decompress new
-static void kv_activate_layer(ss_kv_cache_t *cache, int32_t layer) {
-    if (!cache->lz4_enabled) return;
-    if (cache->active_layer == layer) return;
-
-    // Compress the previously active layer
-    if (cache->active_layer >= 0) {
-        kv_compress_layer(cache, cache->active_layer);
-    }
-
-    // Decompress the new layer
-    kv_decompress_layer(cache, layer);
-    cache->active_layer = layer;
-}
-
 static void kv_cache_free(ss_kv_cache_t *cache) {
-    free(cache->key_cache);
-    free(cache->value_cache);
-    cache->key_cache = NULL;
-    cache->value_cache = NULL;
-
-    if (cache->compressed_keys) {
-        for (int32_t i = 0; i < cache->num_layers; i++) {
-            free(cache->compressed_keys[i]);
-            free(cache->compressed_values[i]);
-        }
-        free(cache->compressed_keys);
-        free(cache->compressed_values);
-    }
-    free(cache->compressed_key_sizes);
-    free(cache->compressed_val_sizes);
+    free(cache->q_key_cache);
+    free(cache->q_val_cache);
+    free(cache->k_scales);
+    free(cache->v_scales);
     free(cache->work_key);
     free(cache->work_value);
+    
+    cache->q_key_cache = NULL;
+    cache->q_val_cache = NULL;
+    cache->k_scales = NULL;
+    cache->v_scales = NULL;
+    cache->work_key = NULL;
+    cache->work_value = NULL;
 }
 
-static float *kv_key_at(ss_kv_cache_t *cache, int32_t layer, int32_t pos) {
-    return cache->key_cache +
-           ((size_t)layer * cache->max_seq_len + pos) * cache->kv_dim;
+// ─── TurboQuant Dynamic Quantization ─────────────────────────────────────────
+
+static inline void kv_turboquant_encode(const float *src, int8_t *dst_q, float *dst_s, int32_t len) {
+    // 1. Find absolute max to determine structural grid scalar boundary
+    float max_val = 0.0f;
+    for (int32_t i = 0; i < len; i++) {
+        float v = fabsf(src[i]);
+        if (v > max_val) max_val = v;
+    }
+    
+    // 2. Compute symmetric 8-bit mapping scale (-127 to +127)
+    float scale = max_val / 127.0f;
+    *dst_s = scale;
+    
+    // 3. Compress directly to int8_t
+    float inv_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
+    for (int32_t i = 0; i < len; i++) {
+        dst_q[i] = (int8_t)roundf(src[i] * inv_scale);
+    }
 }
 
-static float *kv_value_at(ss_kv_cache_t *cache, int32_t layer, int32_t pos) {
-    return cache->value_cache +
-           ((size_t)layer * cache->max_seq_len + pos) * cache->kv_dim;
+static inline void kv_turboquant_decode(const int8_t *src_q, float src_s, float *dst, int32_t len) {
+    // De-quantize cleanly directly back to Floating Point math
+    for (int32_t i = 0; i < len; i++) {
+        dst[i] = (float)src_q[i] * src_s;
+    }
 }
 
 // ─── Initialize ──────────────────────────────────────────────────────────────
@@ -329,13 +257,20 @@ static void ss_matmul_dispatch(ss_scheduler_t *sched, float *out, const void *ma
         } else if (type == GGML_TYPE_F32) {
             gpu_success = ss_metal_matvec(sched->metal_ctx, out, (const float *)mat, vec, rows, cols);
         }
-        // If GPU execution succeeded, we are done!
+        
+        // If GPU execution succeeded we are done!
         if (gpu_success) return;
-        // Otherwise, execution was aborted (e.g. background suspension), fall through to CPU.
+        // Otherwise, execution was aborted (e.g. background suspension, or unsupported format), fall through to CPU NEON.
     }
 #endif
 
     // Fallback: execute on CPU NEON natively.
+    static int printed_cpu_fallback = 0;
+    if (printed_cpu_fallback < 25) {
+        fprintf(stderr, "SlipStream CPU Fallback Warning: CPU taking over tensor evaluation for ggml_type_t enum: %d (rows: %d, cols: %d)\n", type, rows, cols);
+        printed_cpu_fallback++;
+    }
+
     if (type == GGML_TYPE_F32) {
         ss_matvec(out, (const float *)mat, vec, rows, cols);
     } else {
@@ -414,9 +349,17 @@ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx, int32_t pos)
         const void *wk_data = ss_gguf_tensor_data(gguf, wk);
         const void *wv_data = ss_gguf_tensor_data(gguf, wv);
 
+#ifdef SS_HAS_METAL
+        if (sched->metal_ctx) ss_metal_begin_batch(sched->metal_ctx);
+#endif
+
         ss_matmul_dispatch(sched, s->q_buf, wq_data, s->hidden, s->num_heads * s->head_dim, s->hidden_size, wq->type);
         ss_matmul_dispatch(sched, s->k_buf, wk_data, s->hidden, s->num_kv_heads * s->head_dim, s->hidden_size, wk->type);
         ss_matmul_dispatch(sched, s->v_buf, wv_data, s->hidden, s->num_kv_heads * s->head_dim, s->hidden_size, wv->type);
+
+#ifdef SS_HAS_METAL
+        if (sched->metal_ctx) ss_metal_end_batch(sched->metal_ctx);
+#endif
     }
 
     // Apply QKV bias if present (required for Qwen2/2.5)
@@ -462,11 +405,12 @@ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx, int32_t pos)
     ss_rope(s->q_buf, s->k_buf, s->num_heads, s->num_kv_heads,
             s->head_dim, s->rope_dim, pos, sched->rope_theta, sched->is_neox_rope);
 
-    // ── 4. Store KV in cache ──
-    float *k_cache = kv_key_at(&sched->kv_cache, layer_idx, pos);
-    float *v_cache = kv_value_at(&sched->kv_cache, layer_idx, pos);
-    memcpy(k_cache, s->k_buf, s->num_kv_heads * s->head_dim * sizeof(float));
-    memcpy(v_cache, s->v_buf, s->num_kv_heads * s->head_dim * sizeof(float));
+    // ── 4. TurboQuant Dynamic Cache Initialization ──
+    int32_t kv_size = s->num_kv_heads * s->head_dim;
+    size_t vector_idx = (size_t)layer_idx * sched->kv_cache.max_seq_len + pos;
+    
+    kv_turboquant_encode(s->k_buf, sched->kv_cache.q_key_cache + vector_idx * kv_size, &sched->kv_cache.k_scales[vector_idx], kv_size);
+    kv_turboquant_encode(s->v_buf, sched->kv_cache.q_val_cache + vector_idx * kv_size, &sched->kv_cache.v_scales[vector_idx], kv_size);
 
     // ── 5. Multi-Head Attention ──
     int32_t seq_len = pos + 1;
@@ -482,15 +426,20 @@ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx, int32_t pos)
         float *q = s->q_buf + h * s->head_dim;
         int32_t kv_head = h / heads_per_kv;
 
-        // Per-thread scores buffer (pre-allocated pool would be ideal, but stack is fine for <=512)
-        float scores[512]; // safe since max_seq is capped at 512
+        // Per-thread secure localized arrays! Max seq 512, Max Head Dim 256
+        float scores[512]; 
+        float tmp_kv[256]; 
 
-        // Q @ K^T for all positions — vectorized
+        // Q @ K^T for all positions — vectorized 8-Bit Decompression
         for (int32_t t = 0; t < seq_len; t++) {
-            float *kt = kv_key_at(&sched->kv_cache, layer_idx, t)
-                        + kv_head * s->head_dim;
+            size_t v_idx = (size_t)layer_idx * sched->kv_cache.max_seq_len + t;
+            int8_t *q_k = sched->kv_cache.q_key_cache + v_idx * kv_size + kv_head * s->head_dim;
+            float k_scale = sched->kv_cache.k_scales[v_idx];
+            
+            kv_turboquant_decode(q_k, k_scale, tmp_kv, s->head_dim);
+            
             float dot = 0.0f;
-            vDSP_dotpr(q, 1, kt, 1, &dot, s->head_dim);
+            vDSP_dotpr(q, 1, tmp_kv, 1, &dot, s->head_dim);
             scores[t] = dot * scale;
         }
 
@@ -501,15 +450,20 @@ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx, int32_t pos)
         // Softmax
         ss_softmax(scores, seq_len);
 
-        // Weighted sum of values → directly into attn_out slice
+        // Weighted sum of 8-Bit Dynamic Values → directly into attn_out slice
         float *head_dst = s->attn_out + h * s->head_dim;
         memset(head_dst, 0, s->head_dim * sizeof(float));
         for (int32_t t = 0; t < seq_len; t++) {
             float w = scores[t];
-            float *vt = kv_value_at(&sched->kv_cache, layer_idx, t)
-                        + kv_head * s->head_dim;
+            
+            size_t v_idx = (size_t)layer_idx * sched->kv_cache.max_seq_len + t;
+            int8_t *q_v = sched->kv_cache.q_val_cache + v_idx * kv_size + kv_head * s->head_dim;
+            float v_scale = sched->kv_cache.v_scales[v_idx];
+            
+            kv_turboquant_decode(q_v, v_scale, tmp_kv, s->head_dim);
+            
             // cblas_saxpy: head_dst += w * vt (vectorized NEON/AMX)
-            cblas_saxpy(s->head_dim, w, vt, 1, head_dst, 1);
+            cblas_saxpy(s->head_dim, w, tmp_kv, 1, head_dst, 1);
         }
     });
 
@@ -550,8 +504,17 @@ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx, int32_t pos)
 
         // Execute sequentially to avoid nested GCD thread-pool starvation
         // since ss_matmul_dispatch already parallelizes across cores.
+
+#ifdef SS_HAS_METAL
+        if (sched->metal_ctx) ss_metal_begin_batch(sched->metal_ctx);
+#endif
+        
         ss_matmul_dispatch(sched, s->ffn_gate, gate_data, s->hidden, s->intermediate_size, s->hidden_size, w_gate->type);
         ss_matmul_dispatch(sched, s->ffn_buf, up_data, s->hidden, s->intermediate_size, s->hidden_size, w_up->type);
+
+#ifdef SS_HAS_METAL
+        if (sched->metal_ctx) ss_metal_end_batch(sched->metal_ctx);
+#endif
     } else if (w_up) {
         const void *up_data = ss_gguf_tensor_data(gguf, w_up);
         int32_t fused_rows = 2 * s->intermediate_size;
@@ -652,9 +615,7 @@ float *ss_scheduler_forward(ss_scheduler_t *sched, int32_t token_id, int32_t pos
             });
         }
 
-        // Activate this layer's KV cache (decompress from LZ4, compress previous)
-        kv_activate_layer(&sched->kv_cache, l);
-
+        // TurboQuant removes LZ4 un-compression step natively.
         // Process this layer
         process_layer(sched, l, pos);
 
@@ -697,6 +658,16 @@ float *ss_scheduler_forward(ss_scheduler_t *sched, int32_t token_id, int32_t pos
         const void *head_data = ss_gguf_tensor_data(gguf, lm_head);
         if (head_data) {
             ss_matmul_dispatch(sched, s->logits, head_data, s->hidden, s->vocab_size, s->hidden_size, lm_head->type);
+        }
+    }
+
+    // Gemma 1/2 mathematically requires scaling logit outputs down by sqrt(hidden_size)
+    // because the token embeddings are inherently scaled UP at the input layer.
+    // Failing to do so explodes the dots and destroys softmax entropy!
+    if (sched->is_gemma) {
+        float inv_sq = 1.0f / sqrtf((float)s->hidden_size);
+        for (int32_t i = 0; i < s->vocab_size; i++) {
+            s->logits[i] *= inv_sq;
         }
     }
 
@@ -758,10 +729,8 @@ float *ss_scheduler_prefill(ss_scheduler_t *sched, const int32_t *tokens, int32_
             });
         }
 
-        // Activate this layer's KV cache (decompress from LZ4, compress previous)
-        kv_activate_layer(&sched->kv_cache, l);
-
-        // Process this layer for EVERY token
+        // TurboQuant removes LZ4 un-compression step natively.
+        // Process this layer purely for prompt embedding ingestion
         for (int32_t i = 0; i < num_tokens; i++) {
             // Copy batch item into the normal scheduler hidden state
             memcpy(s->hidden, batch_hidden + (size_t)i * s->hidden_size, s->hidden_size * sizeof(float));
@@ -819,6 +788,13 @@ float *ss_scheduler_prefill(ss_scheduler_t *sched, const int32_t *tokens, int32_
         }
     }
 
+    if (sched->is_gemma) {
+        float inv_sq = 1.0f / sqrtf((float)s->hidden_size);
+        for (int32_t i = 0; i < s->vocab_size; i++) {
+            s->logits[i] *= inv_sq;
+        }
+    }
+
     if (gguf->final_logit_softcapping > 0.0f) {
         ss_softcap(s->logits, s->vocab_size, gguf->final_logit_softcapping);
     }
@@ -826,25 +802,133 @@ float *ss_scheduler_prefill(ss_scheduler_t *sched, const int32_t *tokens, int32_
     return s->logits;
 }
 
+float *ss_scheduler_embed(ss_scheduler_t *sched, const int32_t *tokens, int32_t num_tokens) {
+    if (!sched || sched->cancelled || num_tokens <= 0) return NULL;
+
+    ss_gguf_file_t *gguf = sched->gguf;
+    ss_layer_state_t *s = &sched->state;
+
+    // Allocate batch buffers for hidden states
+    float *batch_hidden = (float *)malloc((size_t)num_tokens * s->hidden_size * sizeof(float));
+    if (!batch_hidden) return NULL;
+
+    // ── Embedding lookup for all tokens ──
+    const ss_tensor_info_t *embed = find_global_tensor(gguf, "token_embd.weight");
+    if (!embed) { free(batch_hidden); return NULL; }
+    const void *embed_data = ss_gguf_tensor_data(gguf, embed);
+    if (!embed_data) { free(batch_hidden); return NULL; }
+
+    for (int32_t i = 0; i < num_tokens; i++) {
+        int32_t token_id = tokens[i];
+        float *hidden_i = batch_hidden + (size_t)i * s->hidden_size;
+
+        if (embed->type == GGML_TYPE_F32) {
+            const float *emb = (const float *)embed_data + (size_t)token_id * s->hidden_size;
+            memcpy(hidden_i, emb, s->hidden_size * sizeof(float));
+        } else {
+            size_t type_sz = ss_ggml_type_size(embed->type);
+            uint32_t block_sz = ss_ggml_block_size(embed->type);
+            size_t row_bytes = ((size_t)s->hidden_size / block_sz) * type_sz;
+            const uint8_t *row = (const uint8_t *)embed_data + (size_t)token_id * row_bytes;
+            ss_dequantize(row, hidden_i, s->hidden_size, embed->type);
+        }
+
+        if (sched->is_gemma) {
+            float sq = sqrtf((float)s->hidden_size);
+            for (int32_t j = 0; j < s->hidden_size; j++) {
+                hidden_i[j] *= sq;
+            }
+        }
+    }
+
+    // ── Process all layers (Streaming sequentially across entire sequence) ──
+    for (int32_t l = 0; l < sched->num_layers; l++) {
+        if (sched->cancelled) { free(batch_hidden); return NULL; }
+
+        if (sched->use_prefetch) {
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                if (l + 1 < sched->num_layers) ss_gguf_prefetch_layer(gguf, (uint32_t)(l + 1));
+                if (l + 2 < sched->num_layers) ss_gguf_prefetch_layer(gguf, (uint32_t)(l + 2));
+            });
+        }
+        // TurboQuant removes LZ4 un-compression step natively.
+        for (int32_t i = 0; i < num_tokens; i++) {
+            memcpy(s->hidden, batch_hidden + (size_t)i * s->hidden_size, s->hidden_size * sizeof(float));
+            process_layer(sched, l, i);
+            memcpy(batch_hidden + (size_t)i * s->hidden_size, s->hidden, s->hidden_size * sizeof(float));
+        }
+
+        ss_gguf_evict_layer(gguf, (uint32_t)l);
+
+        if (sched->progress_cb) {
+            char phase[64];
+            snprintf(phase, sizeof(phase), "layer %d/%d", l + 1, sched->num_layers);
+            sched->progress_cb((uint32_t)(l + 1), (uint32_t)sched->num_layers,
+                               phase, sched->progress_user_data);
+        }
+    }
+
+    // ── Final RMS Norm (Applied universally to ALL tokens for Embeddings) ──
+    const ss_tensor_info_t *final_norm = find_global_tensor(gguf, "output_norm.weight");
+    if (final_norm) {
+        const float *norm_w = (const float *)ss_gguf_tensor_data(gguf, final_norm);
+        if (norm_w) {
+            for (int32_t i = 0; i < num_tokens; i++) {
+                float *hidden_i = batch_hidden + (size_t)i * s->hidden_size;
+                if (sched->is_gemma) {
+                    ss_gemma_rmsnorm(hidden_i, hidden_i, norm_w, s->hidden_size, sched->rms_norm_eps, final_norm->type);
+                } else {
+                    ss_rmsnorm(hidden_i, hidden_i, norm_w, s->hidden_size, sched->rms_norm_eps, final_norm->type);
+                }
+            }
+        }
+    }
+
+    // ── Calculate Mean Pooling Embedding Vector ──
+    float *embedding = (float *)malloc(s->hidden_size * sizeof(float));
+    if (!embedding) { free(batch_hidden); return NULL; }
+    memset(embedding, 0, s->hidden_size * sizeof(float));
+
+    for (int32_t i = 0; i < num_tokens; i++) {
+        float *hidden_i = batch_hidden + (size_t)i * s->hidden_size;
+        for (int32_t j = 0; j < s->hidden_size; j++) {
+            embedding[j] += hidden_i[j];
+        }
+    }
+
+    // Average scaling and L2 Normalization sequence
+    float inv_tokens = 1.0f / (float)num_tokens;
+    float l2_norm_sq = 0.0f;
+    for (int32_t j = 0; j < s->hidden_size; j++) {
+        embedding[j] *= inv_tokens;
+        l2_norm_sq += embedding[j] * embedding[j];
+    }
+    
+    // Normalize mapping bounding into a 1-length unit sphere dynamically
+    float l2_scale = 1.0f / (sqrtf(l2_norm_sq) + 1e-12f);
+    for (int32_t j = 0; j < s->hidden_size; j++) {
+        embedding[j] *= l2_scale;
+    }
+
+    free(batch_hidden);
+    return embedding;
+}
+
 void ss_scheduler_reset(ss_scheduler_t *sched) {
     if (!sched) return;
 
-    // Clear KV cache (flat arrays)
+    // Clear TurboQuant KV caches!
     size_t kv_total = (size_t)sched->kv_cache.num_layers *
                       sched->kv_cache.max_seq_len *
                       sched->kv_cache.kv_dim;
-    memset(sched->kv_cache.key_cache, 0, kv_total * sizeof(float));
-    memset(sched->kv_cache.value_cache, 0, kv_total * sizeof(float));
+    memset(sched->kv_cache.q_key_cache, 0, kv_total * sizeof(int8_t));
+    memset(sched->kv_cache.q_val_cache, 0, kv_total * sizeof(int8_t));
+    
+    size_t scale_total = (size_t)sched->kv_cache.num_layers * sched->kv_cache.max_seq_len;
+    memset(sched->kv_cache.k_scales, 0, scale_total * sizeof(float));
+    memset(sched->kv_cache.v_scales, 0, scale_total * sizeof(float));
+    
     sched->kv_cache.seq_len = 0;
-    sched->kv_cache.active_layer = -1;
-
-    // Clear compressed KV storage
-    if (sched->kv_cache.lz4_enabled) {
-        for (int32_t i = 0; i < sched->kv_cache.num_layers; i++) {
-            sched->kv_cache.compressed_key_sizes[i] = 0;
-            sched->kv_cache.compressed_val_sizes[i] = 0;
-        }
-    }
 
     // Reset state
     memset(sched->state.hidden, 0, sched->state.hidden_size * sizeof(float));

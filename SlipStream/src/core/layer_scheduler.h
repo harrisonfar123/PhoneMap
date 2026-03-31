@@ -17,25 +17,20 @@
 // ─── KV Cache ────────────────────────────────────────────────────────────────
 
 typedef struct {
-    float   *key_cache;     // [num_layers, max_seq_len, num_kv_heads * head_dim]
-    float   *value_cache;   // [num_layers, max_seq_len, num_kv_heads * head_dim]
     int32_t  max_seq_len;
     int32_t  num_layers;
     int32_t  kv_dim;        // num_kv_heads * head_dim
     int32_t  seq_len;       // Current sequence length
 
-    // ── LZ4 Compressed KV Cache ──
-    // Only 1 layer is uncompressed at a time. All others are LZ4-compressed.
-    uint8_t **compressed_keys;      // [num_layers] compressed key data
-    uint8_t **compressed_values;    // [num_layers] compressed value data
-    size_t   *compressed_key_sizes; // [num_layers] compressed sizes
-    size_t   *compressed_val_sizes; // [num_layers] compressed sizes
-    float    *work_key;             // Working buffer for 1 layer's keys
-    float    *work_value;           // Working buffer for 1 layer's values
-    size_t    layer_bytes;          // Uncompressed size per layer = max_seq_len * kv_dim * sizeof(float)
-    size_t    compress_bound;       // Max compressed size per layer
-    int32_t   active_layer;         // Which layer is currently decompressed (-1 = none)
-    bool      lz4_enabled;         // Whether LZ4 compression is active
+    // ── TurboQuant Dynamic KV Cache ──
+    int8_t  *q_key_cache;   // [num_layers, max_seq_len, kv_dim]
+    int8_t  *q_val_cache;   // [num_layers, max_seq_len, kv_dim]
+    float   *k_scales;      // [num_layers, max_seq_len] -> Scale boundary for corresponding key vector
+    float   *v_scales;      // [num_layers, max_seq_len] -> Scale boundary for corresponding value vector
+
+    // Native Decompression / Attention Tensors
+    float    *work_key;     // [max_seq_len * kv_dim] Working buffer for dynamically restored keys
+    float    *work_value;   // [max_seq_len * kv_dim] Working buffer for dynamically restored values
 } ss_kv_cache_t;
 
 // ─── Layer State ─────────────────────────────────────────────────────────────
