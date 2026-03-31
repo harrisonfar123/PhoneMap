@@ -1,0 +1,21 @@
+--- src/core/engine.c
++++ src/core/engine.c
+@@ -74,6 +74,18 @@
+         return NULL;
+     }
+ 
++    // Clamp vocab_size to physical matrix size before tokenizer init.
++    // Some quantized/padded GGUFs have mismatched metadata vocab_size.
++    for (uint64_t i = 0; i < model->gguf->tensor_count; i++) {
++        if ((strcmp(model->gguf->tensors[i].name, "output.weight") == 0 ||
++             strcmp(model->gguf->tensors[i].name, "token_embd.weight") == 0) &&
++            model->gguf->tensors[i].n_dims == 2) {
++            if ((int32_t)model->gguf->tensors[i].dims[1] < model->gguf->vocab_size) {
++                model->gguf->vocab_size = (int32_t)model->gguf->tensors[i].dims[1];
++            }
++        }
++    }
++
+     // ── Initialize tokenizer ──
+     model->tokenizer = ss_tokenizer_create(model->gguf->vocab,
+                                             model->gguf->vocab_scores,

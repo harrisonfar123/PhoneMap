@@ -1,0 +1,24 @@
+name: VectorLens
+options:
+  bundleIdPrefix: com.harrisonfarrell
+  deploymentTarget:
+    iOS: 16.0
+targets:
+  VectorLens:
+    type: application
+    platform: iOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchStoryboardName: LaunchScreen
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSPhotoLibraryUsageDescription: "VectorLens requires access to your photos to build the semantic search index."
+        NSCalendarsUsageDescription: "Access calendars for contextual tagging."
+        NSContactsUsageDescription: "Access your contacts to build semantic identity graphs."
+    dependencies:
+      - package: SlipStream
+packages:
+  SlipStream:
+    path: SlipStream

@@ -1,0 +1,47 @@
+@@ -216,6 +216,14 @@
+     return sched;
+ }
+ 
++// Helper to safely load bias/norm data handling both F32 and F16
++static inline float safe_load_f32(const void *data, int32_t idx, ggml_type_t type) {
++    if (type == GGML_TYPE_F16) {
++        return ss_f16_to_f32(((const uint16_t *)data)[idx]);
++    }
++    return ((const float *)data)[idx];
++}
++
+ // ─── Process Single Layer ───────────────────────────────────────────────────
+ 
+ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx,
+@@ -279,25 +287,25 @@
+ 
+     // Apply QKV bias if present (required for Qwen2/2.5)
+     if (bq) {
+-        const float *bq_data = (const float *)ss_gguf_tensor_data(gguf, bq);
++        const void *bq_data = ss_gguf_tensor_data(gguf, bq);
+         if (bq_data) {
+             for (int32_t i = 0; i < s->num_heads * s->head_dim; i++) {
+-                s->q_buf[i] += bq_data[i];
++                s->q_buf[i] += safe_load_f32(bq_data, i, bq->type);
+             }
+         }
+     }
+     if (bk) {
+-        const float *bk_data = (const float *)ss_gguf_tensor_data(gguf, bk);
++        const void *bk_data = ss_gguf_tensor_data(gguf, bk);
+         if (bk_data) {
+             for (int32_t i = 0; i < s->num_kv_heads * s->head_dim; i++) {
+-                s->k_buf[i] += bk_data[i];
++                s->k_buf[i] += safe_load_f32(bk_data, i, bk->type);
+             }
+         }
+     }
+     if (bv) {
+-        const float *bv_data = (const float *)ss_gguf_tensor_data(gguf, bv);
++        const void *bv_data = ss_gguf_tensor_data(gguf, bv);
+         if (bv_data) {
+             for (int32_t i = 0; i < s->num_kv_heads * s->head_dim; i++) {
+-                s->v_buf[i] += bv_data[i];
++                s->v_buf[i] += safe_load_f32(bv_data, i, bv->type);
+             }
+         }

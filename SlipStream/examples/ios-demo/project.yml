@@ -1,0 +1,19 @@
+name: SlipStreamDemo
+options:
+  bundleIdPrefix: com.slipstream.app
+packages:
+  SlipStream:
+    path: ../../
+targets:
+  SlipStreamDemo:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        UILaunchScreen: {}
+    dependencies:
+      - package: SlipStream
+        product: SlipStream

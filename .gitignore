@@ -1,0 +1,18 @@
+# Xcode
+build/
+DerivedData/
+*.pbxproj
+*.xcworkspace
+xcuserdata/
+*.xcodeproj/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# OS X
+.DS_Store
+
+# Large Models (Best practice to not commit these to a standard git repo)
+App/*.gguf
+*.gguf

@@ -1,0 +1,15 @@
+@@ -216,6 +216,14 @@
+     return sched;
+ }
+ 
++// Helper to safely load bias/norm data handling both F32 and F16
++static inline float safe_load_f32(const void *data, uint32_t idx, ggml_type_t type) {
++    if (type == GGML_TYPE_F16) {
++        return ss_f16_to_f32(((const uint16_t *)data)[idx]);
++    }
++    return ((const float *)data)[idx];
++}
++
+ // ─── Process Single Layer ───────────────────────────────────────────────────
+ 
+ static void process_layer(ss_scheduler_t *sched, int32_t layer_idx,

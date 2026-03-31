@@ -1,0 +1,13 @@
+--- src/core/engine.c
++++ src/core/engine.c
+@@ -108,6 +108,10 @@
+         return NULL;
+     }
+ 
++    // Sync vocab sizes: if the scheduler clamped the vocab_size down to physical bounds,
++    // update the overarching engine vocab_size so sampler limits don't read OOB memory.
++    model->gguf->vocab_size = model->scheduler->state.vocab_size;
++
+     // ── Initialize thread pool ──
+     uint32_t n_threads = model->config.n_threads > 0
+                          ? model->config.n_threads
