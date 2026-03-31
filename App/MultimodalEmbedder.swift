@@ -1,6 +1,5 @@
 import Foundation
 import CoreImage
-import CoreML
 import Vision
 import SlipStream
 import Accelerate
@@ -11,86 +10,73 @@ public protocol MotimodelProvider {
 }
 
 /// The local edge unified motimodel wrapper for the `VectorLens` database.
-/// This acts as a facade, calling SlipStream for text constraints, and 
-/// invoking a CoreML CLIP/Vision transformer model for pixel constraints.
+/// This uses native Apple Vision framework to map physical images into english strings, 
+/// invoking Nomic SlipStream to perfectly unite everything into language-space vectors!
 public class LocalMotimodelEngine: MotimodelProvider {
     private let textEngine: SlipStreamModel
-    private var visionModel: MLModel?
     
     public init(textEngine: SlipStreamModel) {
         self.textEngine = textEngine
-        
-        // Dynamically load CoreML if the user dropped the file into Xcode!
-        if let url = Bundle.main.url(forResource: "CLIPVision", withExtension: "mlmodelc") {
-            do {
-                let config = MLModelConfiguration()
-                config.computeUnits = .all
-                self.visionModel = try MLModel(contentsOf: url, configuration: config)
-                print("Motimodel: CLIPVision CoreML initialized!")
-            } catch {
-                print("Motimodel: Failed to bind CLIPVision: \(error)")
-            }
-        } else {
-            print("Motimodel: CLIPVision not found. Falling back to dimensional stubs.")
-        }
     }
     
     public func embed(text: String) async throws -> [Float] {
-        // Our current Qwen/Nomic models natively spit out 768-D.
-        // If we switch to CLIP later, it might be 512-D. DB is agnostic.
         return try await textEngine.embed(prompt: text)
     }
     
     public func embed(image: CGImage) async throws -> [Float] {
-        guard let mlModel = visionModel else {
-            // Unchanged fallback if no downloaded model exists yet
-            let w = Float(image.width) / 2000.0; let h = Float(image.height) / 2000.0
-            var fakeVector = [Float](repeating: 0.0, count: 768)
-            fakeVector[0] = w; fakeVector[1] = h; fakeVector[10] = 0.5
-            try await Task.sleep(nanoseconds: 10_000_000)
-            return fakeVector
-        }
+        // "Translation by Alignment"
+        // Generate an English description natively so `nomic` understands it mathematically!
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
         
-        // The real Apple Neural Engine inference layer!
+        // 1. Apple On-Device ML (Works 100% on Simulators without hacking computeUnits)
+        let classificationRequest = VNClassifyImageRequest()
+        let textRequest = VNRecognizeTextRequest()
+        textRequest.recognitionLevel = .accurate
+        
         return try await withCheckedThrowingContinuation { continuation in
-            do {
-                let vnModel = try VNCoreMLModel(for: mlModel)
-                let request = VNCoreMLRequest(model: vnModel) { request, error in
-                    if let err = error {
-                        continuation.resume(throwing: err)
-                        return
-                    }
-                    guard let results = request.results as? [VNCoreMLFeatureValueObservation],
-                          let firstResult = results.first,
-                          let multiArray = firstResult.featureValue.multiArrayValue else {
-                        continuation.resume(throwing: NSError(domain: "Motimodel", code: 1, userInfo: [NSLocalizedDescriptionKey: "Vision tensor unpack failed"]))
-                        return
-                    }
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try handler.perform([classificationRequest, textRequest])
                     
-                    let count = multiArray.count
-                    var vector = [Float](repeating: 0, count: count)
+                    var descriptions: [String] = []
                     
-                    // Pointer binding to safely convert Tensor array directly into swift Float math vector
-                    let ptr = multiArray.dataPointer.bindMemory(to: Float.self, capacity: count)
-                    for i in 0..<count {
-                        vector[i] = ptr[i]
+                    // Filter High-Confidence Object Detections (e.g. "Cat", "Beach")
+                    if let results = classificationRequest.results {
+                        let topTags = results
+                            .filter { $0.confidence > 0.6 } // Very strict confidence
+                            .prefix(5)
+                            .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
+                        
+                        if !topTags.isEmpty {
+                            descriptions.append("Photo depicting " + topTags.joined(separator: ", "))
+                        }
                     }
                     
-                    continuation.resume(returning: vector)
+                    // Filter Raw OCR Text in the image
+                    if let textResults = textRequest.results {
+                        let topWords = textResults
+                            .prefix(15) // Max 15 lines of text
+                            .compactMap { $0.topCandidates(1).first?.string }
+                        
+                        if !topWords.isEmpty {
+                            descriptions.append("Contains visible text: '" + topWords.joined(separator: " ") + "'")
+                        }
+                    }
+                    
+                    let finalSentence = descriptions.isEmpty ? "A blank or unidentifiable photo." : descriptions.joined(separator: ". ")
+                    
+                    // Task bounce-back to await the C-Engine!
+                    Task {
+                        do {
+                            let vector = try await self.textEngine.embed(prompt: finalSentence)
+                            continuation.resume(returning: vector)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                
-                request.imageCropAndScaleOption = .centerCrop
-                
-                let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                DispatchQueue.global(qos: .userInitiated).async {
-                    do {
-                        try handler.perform([request])
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
-            } catch {
-                continuation.resume(throwing: error)
             }
         }
     }
