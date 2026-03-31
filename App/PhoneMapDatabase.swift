@@ -151,4 +151,12 @@ public class PhoneMapDatabase {
         // Optionally write back projection updates to SQL.
         // For MVP speed, keep in memory.
     }
+    
+    public func deleteAllItems() throws {
+        let deleteSQL = "DELETE FROM phone_items;"
+        if sqlite3_exec(db, deleteSQL, nil, nil, nil) != SQLITE_OK {
+            throw NSError(domain: "PhoneMapDB", code: 5, userInfo: [NSLocalizedDescriptionKey: "Failed deleting items"])
+        }
+        cachedItems.removeAll()
+    }
 }

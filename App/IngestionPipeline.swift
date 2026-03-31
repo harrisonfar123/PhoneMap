@@ -14,14 +14,17 @@ public class IngestionPipeline {
     
     /// Starts the indexing process on a background actor
     public func startIndexing(progress: @escaping (Double, String) -> Void) async {
+        do {
+            try db.deleteAllItems()
+        } catch {
+            print("Failed to clear DB before re-indexing: \(error)")
+        }
+        
         progress(0.1, "Extracting Contacts...")
         await indexContacts()
         
-        progress(0.4, "Extracting Semantic Pixels (Photos)...")
+        progress(0.5, "Extracting Semantic Pixels (Photos)...")
         await indexPhotos(limit: 50)
-        
-        progress(0.8, "Extracting Local Files...")
-        await indexLocalNotes()
         
         progress(1.0, "Indexing Complete!")
     }
@@ -104,24 +107,6 @@ public class IngestionPipeline {
             
         } catch {
             print("Failed to embed photo: \(error)")
-        }
-    }
-    
-    private func indexLocalNotes() async {
-        // Fallback dummy data for the MVP to showcase the clustering immediately
-        // since full sandbox filesystem access requires user picker intents.
-        let dummyNotes = [
-            "Meeting with engineering team about the new backend architecture constraints.",
-            "Grocery list: Milk, Eggs, Bread, Bananas, Coffee.",
-            "Flight tickets to Tokyo booked for October 12th. Confirmation number: XJ932K.",
-            "Gym routine: Bench press 3x10, Squats 4x8, Deadlift 3x5.",
-            "Idea for startup: AI-powered vector search for local on-device files.",
-            "Call Sarah for her birthday tomorrow at 5 PM."
-        ]
-        
-        for (i, note) in dummyNotes.enumerated() {
-            let id = "note_\(i)"
-            await processAndStore(id: id, type: "note", text: note)
         }
     }
     

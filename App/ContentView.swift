@@ -14,10 +14,9 @@ struct ContentView: View {
     @State private var isIndexing = false
     @State private var indexingStatus = "Initializing..."
     @State private var progress: Double = 0.0
-    @AppStorage("hasCompletedFirstRun") private var hasCompletedFirstRun: Bool = false
     
     @State private var selectedItem: PhoneItemMeta?
-    @State private var activeFilters: Set<String> = ["contact", "note", "photo", "message"]
+    @State private var activeFilters: Set<String> = ["contact", "photo"]
     
     let clusterColors: [Color] = [
         .purple, .blue, .green, .orange, .pink, .teal, .indigo, .mint
@@ -84,7 +83,7 @@ struct ContentView: View {
                         // Type Filters
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack {
-                                ForEach(["contact", "note", "photo", "message"], id: \.self) { type in
+                                ForEach(["contact", "photo"], id: \.self) { type in
                                     Button(action: {
                                         withAnimation {
                                             if activeFilters.contains(type) { activeFilters.remove(type) }
@@ -93,9 +92,10 @@ struct ContentView: View {
                                     }) {
                                         Text(type.capitalized)
                                             .font(.caption).bold()
-                                            .padding(.horizontal, 10).padding(.vertical, 5)
-                                            .background(activeFilters.contains(type) ? Color.purple.opacity(0.8) : Color.white.opacity(0.2))
-                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 14).padding(.vertical, 8)
+                                            .background(.ultraThinMaterial)
+                                            .overlay(Capsule().stroke(activeFilters.contains(type) ? Color.purple : Color.white.opacity(0.3), lineWidth: 1.5))
+                                            .foregroundColor(activeFilters.contains(type) ? .white : .gray)
                                             .clipShape(Capsule())
                                     }
                                 }
@@ -105,40 +105,24 @@ struct ContentView: View {
                     
                     Spacer()
                     
-                    if !hasCompletedFirstRun {
-                        Button(action: startIndexing) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 20))
-                                .foregroundColor(isIndexing ? .green : .white)
-                                .padding(10)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
+                    Button(action: startIndexing) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .rotationEffect(.degrees(isIndexing ? 360 : 0))
+                                .animation(isIndexing ? Animation.linear(duration: 1).repeatForever(autoreverses: false) : .default, value: isIndexing)
+                            Text("Scan Device")
+                                .font(.caption).bold()
                         }
-                        .disabled(isIndexing)
-                    } else {
-                        Image(systemName: "checkmark.seal.fill")
-                            .font(.system(size: 24))
-                            .foregroundColor(.green)
-                            .shadow(color: .green.opacity(0.8), radius: 5)
-                            .padding(.trailing, 10)
+                        .foregroundColor(isIndexing ? .gray : .white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial)
+                        .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
+                        .clipShape(Capsule())
                     }
+                    .disabled(isIndexing)
                 }
                 .padding()
-                
-                if isIndexing {
-                    VStack(alignment: .leading) {
-                        Text(indexingStatus)
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        ProgressView(value: progress)
-                            .progressViewStyle(LinearProgressViewStyle(tint: .purple))
-                    }
-                    .padding()
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(12)
-                    .padding(.horizontal)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
                 
                 Spacer()
                 
@@ -215,6 +199,40 @@ struct ContentView: View {
                 .padding(.horizontal)
                 .padding(.bottom, 30)
             }
+            
+            // ─── 3. Global Loading Overlay ───
+            if isIndexing {
+                ZStack {
+                    Color.black.opacity(0.6).ignoresSafeArea()
+                    
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+                        
+                        Text(indexingStatus)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            
+                        Text(String(format: "%.0f%%", progress * 100))
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    .padding(40)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 30))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 30)
+                            .stroke(
+                                LinearGradient(colors: [.purple, .clear, .blue], startPoint: .topLeading, endPoint: .bottomTrailing),
+                                lineWidth: 2
+                            )
+                    )
+                    .shadow(color: .purple.opacity(0.4), radius: 30)
+                }
+                .transition(.opacity.combined(with: .scale))
+            }
         }
         .onAppear {
             initializeBackend()
@@ -255,7 +273,7 @@ struct ContentView: View {
     }
     
     private func startIndexing() {
-        guard let pipeline = pipeline, !isIndexing, !hasCompletedFirstRun else { return }
+        guard let pipeline = pipeline, !isIndexing else { return }
         
         withAnimation { isIndexing = true }
         
@@ -282,7 +300,6 @@ struct ContentView: View {
                 self.db?.updateItemsCache(self.items)
                 withAnimation { 
                     self.isIndexing = false 
-                    self.hasCompletedFirstRun = true
                 }
             }
         }
