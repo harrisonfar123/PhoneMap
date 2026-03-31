@@ -14,6 +14,7 @@ public struct PhoneItemMeta {
 
 public class PhoneMapDatabase {
     private var db: OpaquePointer?
+    private let lock = NSLock()
     
     // In-memory cache for fast vector searches
     private var cachedItems: [PhoneItemMeta] = []
@@ -50,6 +51,9 @@ public class PhoneMapDatabase {
     }
     
     public func insertItem(_ item: PhoneItemMeta) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        
         let insertSQL = "INSERT OR REPLACE INTO phone_items (id, type, content_text, x, y, cluster, embedding) VALUES (?, ?, ?, ?, ?, ?, ?);"
         var stmt: OpaquePointer?
         
@@ -79,6 +83,9 @@ public class PhoneMapDatabase {
     }
     
     private func loadCache() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        
         cachedItems.removeAll()
         
         let query = "SELECT id, type, content_text, x, y, cluster, embedding FROM phone_items;"
@@ -130,6 +137,9 @@ public class PhoneMapDatabase {
     
     /// Find top K most similar items
     public func search(queryEmbedding: [Float], topK: Int = 10) -> [(item: PhoneItemMeta, score: Float)] {
+        lock.lock()
+        defer { lock.unlock() }
+        
         var scored: [(item: PhoneItemMeta, score: Float)] = []
         
         for item in cachedItems {
@@ -142,10 +152,14 @@ public class PhoneMapDatabase {
     }
     
     public func getAllItems() -> [PhoneItemMeta] {
+        lock.lock()
+        defer { lock.unlock() }
         return cachedItems
     }
     
     public func updateItemsCache(_ items: [PhoneItemMeta]) {
+        lock.lock()
+        defer { lock.unlock() }
         self.cachedItems = items
         
         // Optionally write back projection updates to SQL.
@@ -153,6 +167,9 @@ public class PhoneMapDatabase {
     }
     
     public func deleteAllItems() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        
         let deleteSQL = "DELETE FROM phone_items;"
         if sqlite3_exec(db, deleteSQL, nil, nil, nil) != SQLITE_OK {
             throw NSError(domain: "PhoneMapDB", code: 5, userInfo: [NSLocalizedDescriptionKey: "Failed deleting items"])
