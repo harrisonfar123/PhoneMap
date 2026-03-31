@@ -31,12 +31,12 @@ public class IngestionPipeline {
     
     private func indexContacts() async {
         let store = CNContactStore()
-        let keysToFetch = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactNoteKey, CNContactJobTitleKey] as [CNKeyDescriptor]
+        let keysToFetch = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactJobTitleKey] as [CNKeyDescriptor]
         let request = CNContactFetchRequest(keysToFetch: keysToFetch)
         
         do {
             try store.enumerateContacts(with: request) { contact, stop in
-                let text = "\(contact.givenName) \(contact.familyName). \(contact.jobTitle). \(contact.note)"
+                let text = "\(contact.givenName) \(contact.familyName). \(contact.jobTitle)"
                 if !text.trimmingCharacters(in: .whitespaces).isEmpty {
                     Task {
                         await self.processAndStore(id: contact.identifier, type: "contact", text: text)
@@ -49,7 +49,11 @@ public class IngestionPipeline {
     }
     
     private func indexPhotos(limit: Int) async {
-        let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if auth == .notDetermined {
+            auth = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        }
+        
         guard auth == .authorized || auth == .limited else {
             print("Photo permission not granted.")
             return

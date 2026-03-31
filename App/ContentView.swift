@@ -16,7 +16,6 @@ struct ContentView: View {
     @State private var progress: Double = 0.0
     
     @State private var selectedItem: PhoneItemMeta?
-    @State private var activeFilters: Set<String> = ["contact", "photo"]
     
     let clusterColors: [Color] = [
         .purple, .blue, .green, .orange, .pink, .teal, .indigo, .mint
@@ -33,7 +32,7 @@ struct ContentView: View {
                 Canvas { context, size in
                     context.translateBy(x: size.width / 2, y: size.height / 2)
                     
-                    for item in items where activeFilters.contains(item.type) {
+                    for item in items {
                         let rect = CGRect(
                             x: item.x * scale,
                             y: item.y * scale,
@@ -59,7 +58,7 @@ struct ContentView: View {
                             let tapX = (value.location.x - center.x) / scale
                             let tapY = (value.location.y - center.y) / scale
                             
-                            if let tapped = items.first(where: { activeFilters.contains($0.type) && abs($0.x - tapX) < 10 && abs($0.y - tapY) < 10 }) {
+                            if let tapped = items.first(where: { abs($0.x - tapX) < 10 && abs($0.y - tapY) < 10 }) {
                                 withAnimation { selectedItem = tapped }
                             } else {
                                 withAnimation { selectedItem = nil }
@@ -79,28 +78,6 @@ struct ContentView: View {
                             .fontWeight(.heavy)
                             .foregroundColor(.white)
                             .shadow(color: .purple.opacity(0.5), radius: 10, x: 0, y: 0)
-                        
-                        // Type Filters
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack {
-                                ForEach(["contact", "photo"], id: \.self) { type in
-                                    Button(action: {
-                                        withAnimation {
-                                            if activeFilters.contains(type) { activeFilters.remove(type) }
-                                            else { activeFilters.insert(type) }
-                                        }
-                                    }) {
-                                        Text(type.capitalized)
-                                            .font(.caption).bold()
-                                            .padding(.horizontal, 14).padding(.vertical, 8)
-                                            .background(.ultraThinMaterial)
-                                            .overlay(Capsule().stroke(activeFilters.contains(type) ? Color.purple : Color.white.opacity(0.3), lineWidth: 1.5))
-                                            .foregroundColor(activeFilters.contains(type) ? .white : .gray)
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                            }
-                        }
                     }
                     
                     Spacer()
