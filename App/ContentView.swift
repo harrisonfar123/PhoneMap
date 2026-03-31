@@ -3,7 +3,7 @@ import SlipStream
 
 struct ContentView: View {
     @State private var db: PhoneMapDatabase?
-    @State private var embedder: SlipStreamModel?
+    @State private var embedder: MotimodelProvider?
     @State private var pipeline: IngestionPipeline?
     
     @State private var items: [PhoneItemMeta] = []
@@ -229,16 +229,17 @@ struct ContentView: View {
             do {
                 // In a real device app, model is bundled or downloaded to documents path
                 let modelPath = Bundle.main.path(forResource: "nomic-embed-text-v1.5-q4_k_m", ofType: "gguf") ?? "/tmp/model.gguf"
-                let e = try SlipStreamModel(path: modelPath)
+                let textEngine = try SlipStreamModel(path: modelPath)
+                let unifiedEngine = LocalMotimodelEngine(textEngine: textEngine)
                 
                 let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
                 let dbPath = docsURL.appendingPathComponent("phonemap.sqlite").path
                 let d = try PhoneMapDatabase(databasePath: dbPath)
                 
-                let p = IngestionPipeline(db: d, embedder: e)
+                let p = IngestionPipeline(db: d, embedder: unifiedEngine)
                 
                 DispatchQueue.main.async {
-                    self.embedder = e
+                    self.embedder = unifiedEngine
                     self.db = d
                     self.pipeline = p
                     self.items = d.getAllItems()
@@ -291,7 +292,7 @@ struct ContentView: View {
         guard let db = db, let embedder = embedder, !query.isEmpty else { return }
         
         do {
-            let qVector = try await embedder.embed(prompt: query)
+            let qVector = try await embedder.embed(text: query)
             let results = db.search(queryEmbedding: qVector, topK: 5)
             
             DispatchQueue.main.async {
