@@ -212,6 +212,8 @@ struct SearchResultRow: View {
     let score: Float?
     let color: Color
     
+    @State private var isExpanded = false
+    
     var iconName: String {
         switch item.type.lowercased() {
         case "photo": return "photo.fill"
@@ -223,37 +225,46 @@ struct SearchResultRow: View {
     }
     
     var body: some View {
-        HStack(alignment: .top, spacing: 15) {
-            Image(systemName: iconName)
-                .font(.title2)
-                .foregroundColor(color)
-                .frame(width: 30)
-            
-            VStack(alignment: .leading, spacing: 5) {
-                Text(item.type.capitalized)
-                    .font(.caption)
-                    .bold()
-                    .foregroundColor(.secondary)
+        Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                isExpanded.toggle()
+            }
+        }) {
+            HStack(alignment: .top, spacing: 15) {
+                Image(systemName: iconName)
+                    .font(.title2)
+                    .foregroundColor(color)
+                    .frame(width: 30)
                 
-                Text(item.contentText)
-                    .font(.subheadline)
-                    .foregroundColor(.primary)
-                    .lineLimit(3)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(item.type.capitalized)
+                        .font(.caption)
+                        .bold()
+                        .foregroundColor(.secondary)
+                    
+                    Text(item.contentText)
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .lineLimit(isExpanded ? nil : 2)
+                        .multilineTextAlignment(.leading)
+                }
+                
+                Spacer()
+                
+                if let s = score {
+                    Text(String(format: "%.0f%%", s * 100))
+                        .font(.caption2)
+                        .bold()
+                        .padding(5)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(5)
+                }
             }
-            
-            Spacer()
-            
-            if let s = score {
-                Text(String(format: "%.0f%%", s * 100))
-                    .font(.caption2)
-                    .bold()
-                    .padding(5)
-                    .background(Color.green.opacity(0.2))
-                    .foregroundColor(.green)
-                    .cornerRadius(5)
-            }
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 5)
+        .buttonStyle(.plain)
     }
 }
 

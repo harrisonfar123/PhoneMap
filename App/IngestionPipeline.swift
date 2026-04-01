@@ -26,12 +26,6 @@ public class IngestionPipeline {
         progress(0.4, "Extracting Semantic Pixels (Photos)...")
         await indexPhotos(limit: 50)
         
-        progress(0.7, "Indexing Sub-systems (Apps)...")
-        await indexMockApps()
-        
-        progress(0.9, "Scanning Documents Directory...")
-        await indexFiles()
-        
         progress(1.0, "Indexing Complete!")
     }
     
@@ -73,22 +67,28 @@ public class IngestionPipeline {
         
         let manager = PHImageManager.default()
         let requestOptions = PHImageRequestOptions()
-        requestOptions.isSynchronous = false
+        requestOptions.isSynchronous = true // CRITICAL: Prevents duplicate continuation resumes
         requestOptions.deliveryMode = .highQualityFormat
-        requestOptions.isNetworkAccessAllowed = false
+        requestOptions.isNetworkAccessAllowed = true
         
         for i in 0..<assets.count {
             let asset = assets.object(at: i)
             
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 manager.requestImage(for: asset, targetSize: CGSize(width: 512, height: 512), contentMode: .aspectFill, options: requestOptions) { image, info in
-                    guard let cgImg = image?.cgImage else {
+                    
+                    var safeCgImage = image?.cgImage
+                    if safeCgImage == nil, let ci = image?.ciImage {
+                        safeCgImage = CIContext().createCGImage(ci, from: ci.extent)
+                    }
+                    
+                    guard let finalCgImg = safeCgImage else {
                         continuation.resume()
                         return
                     }
                     
                     Task {
-                        await self.processAndStoreImage(id: asset.localIdentifier, type: "photo", image: cgImg)
+                        await self.processAndStoreImage(id: asset.localIdentifier, type: "photo", image: finalCgImg)
                         continuation.resume()
                     }
                 }
