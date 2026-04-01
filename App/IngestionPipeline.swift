@@ -24,7 +24,7 @@ public class IngestionPipeline {
         await indexContacts()
         
         progress(0.4, "Extracting Semantic Pixels (Photos)...")
-        await indexPhotos(limit: 50)
+        await indexPhotos(limit: 500)
         
         progress(1.0, "Indexing Complete!")
     }

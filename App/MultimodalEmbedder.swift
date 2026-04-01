@@ -43,8 +43,8 @@ public class LocalMotimodelEngine: MotimodelProvider {
                     // Filter High-Confidence Object Detections (e.g. "Cat", "Beach")
                     if let results = classificationRequest.results {
                         let topTags = results
-                            .filter { $0.confidence > 0.6 } // Very strict confidence
-                            .prefix(5)
+                            .filter { $0.confidence > 0.1 } // Relaxed to sweep Apple taxonomy!
+                            .prefix(10)
                             .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
                         
                         if !topTags.isEmpty {
