@@ -2,7 +2,7 @@ import Foundation
 import Accelerate
 import SQLite3
 
-public struct PhoneItemMeta {
+public struct PhoneItemMeta: Identifiable {
     public let id: String
     public let type: String
     public let contentText: String

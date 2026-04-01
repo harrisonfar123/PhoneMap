@@ -6,7 +6,7 @@ import Accelerate
 
 public protocol MotimodelProvider {
     func embed(text: String) async throws -> [Float]
-    func embed(image: CGImage) async throws -> [Float]
+    func embed(image: CGImage) async throws -> (description: String, vector: [Float])
 }
 
 /// The local edge unified motimodel wrapper for the `VectorLens` database.
@@ -23,7 +23,7 @@ public class LocalMotimodelEngine: MotimodelProvider {
         return try await textEngine.embed(prompt: text)
     }
     
-    public func embed(image: CGImage) async throws -> [Float] {
+    public func embed(image: CGImage) async throws -> (description: String, vector: [Float]) {
         // "Translation by Alignment"
         // Generate an English description natively so `nomic` understands it mathematically!
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
@@ -69,7 +69,7 @@ public class LocalMotimodelEngine: MotimodelProvider {
                     Task {
                         do {
                             let vector = try await self.textEngine.embed(prompt: finalSentence)
-                            continuation.resume(returning: vector)
+                            continuation.resume(returning: (description: finalSentence, vector: vector))
                         } catch {
                             continuation.resume(throwing: error)
                         }

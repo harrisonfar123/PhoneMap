@@ -23,8 +23,14 @@ public class IngestionPipeline {
         progress(0.1, "Extracting Contacts...")
         await indexContacts()
         
-        progress(0.5, "Extracting Semantic Pixels (Photos)...")
+        progress(0.4, "Extracting Semantic Pixels (Photos)...")
         await indexPhotos(limit: 50)
+        
+        progress(0.7, "Indexing Sub-systems (Apps)...")
+        await indexMockApps()
+        
+        progress(0.9, "Scanning Documents Directory...")
+        await indexFiles()
         
         progress(1.0, "Indexing Complete!")
     }
@@ -92,7 +98,7 @@ public class IngestionPipeline {
     
     private func processAndStoreImage(id: String, type: String, image: CGImage) async {
         do {
-            let vector = try await embedder.embed(image: image)
+            let tuple = try await embedder.embed(image: image)
             
             let x = Double.random(in: -100...100)
             let y = Double.random(in: -100...100)
@@ -100,11 +106,11 @@ public class IngestionPipeline {
             let item = PhoneItemMeta(
                 id: id,
                 type: type,
-                contentText: "Camera Roll Asset (Local Motimodel Vector)",
+                contentText: tuple.description, // Maps Apple Vision description natively!
                 x: x,
                 y: y,
                 cluster: Int.random(in: 0...4),
-                embedding: vector
+                embedding: tuple.vector
             )
             
             try db.insertItem(item)
@@ -138,7 +144,48 @@ public class IngestionPipeline {
             try db.insertItem(item)
             
         } catch {
-            print("Failed to embed item \\(id): \\(error)")
+            print("Failed to embed item \(id): \(error)")
+        }
+    }
+    
+    private func indexMockApps() async {
+        let mockApps = [
+            ("com.apple.mobilesafari", "Safari - Web Browser. Surf the web, access bookmarks, read internet sites. Utility."),
+            ("com.apple.Notes", "Apple Notes - Write down thoughts, save links, draw ideas. Editor."),
+            ("com.apple.weather", "Weather - Check current forecast, temperature, radar, and rain. Widgets."),
+            ("com.apple.MobileSMS", "Messages - Send text messages, SMS, and iMessage over internet. Communication."),
+            ("com.apple.camera", "Camera - Take photos, record videos, portrait mode. Lens."),
+            ("com.spotify.client", "Spotify - Play music, listen to podcasts, discover audio. Media."),
+            ("com.burbn.instagram", "Instagram - Share photos, message friends, watch reels. Social Media."),
+            ("com.apple.Health", "Health App - Track daily steps, heart rate, nutrition, sleep data. Wellness.")
+        ]
+        
+        for app in mockApps {
+            Task {
+                await self.processAndStore(id: app.0, type: "app", text: app.1)
+            }
+        }
+    }
+    
+    private func indexFiles() async {
+        let fileManager = FileManager.default
+        guard let docsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        
+        do {
+            let fileURLs = try fileManager.contentsOfDirectory(at: docsURL, includingPropertiesForKeys: nil)
+            for url in fileURLs {
+                let ext = url.pathExtension.lowercased()
+                if ext == "txt" || ext == "csv" || ext == "json" {
+                    if let fileContent = try? String(contentsOf: url, encoding: .utf8) {
+                        let contentToEmbed = "File Name: \(url.lastPathComponent). Contents: \(fileContent)"
+                        Task {
+                            await self.processAndStore(id: url.absoluteString, type: "file", text: contentToEmbed)
+                        }
+                    }
+                }
+            }
+        } catch {
+            print("Failed to read App Documents: \(error)")
         }
     }
 }

@@ -15,214 +15,119 @@ struct ContentView: View {
     @State private var indexingStatus = "Initializing..."
     @State private var progress: Double = 0.0
     
-    @State private var selectedItem: PhoneItemMeta?
+    @State private var isShowing3DCanvas = false
     
     let clusterColors: [Color] = [
         .purple, .blue, .green, .orange, .pink, .teal, .indigo, .mint
     ]
     
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            
-            // ─── 1. Semantic Map Canvas (UMAP Fallback) ───
-            GeometryReader { geo in
-                let scale = min(geo.size.width, geo.size.height) / 100.0 // Adjusted for force-directed layout
-                
-                Canvas { context, size in
-                    context.translateBy(x: size.width / 2, y: size.height / 2)
-                    
-                    for item in items {
-                        let rect = CGRect(
-                            x: item.x * scale,
-                            y: item.y * scale,
-                            width: 16, height: 16
-                        )
-                        let path = Path(ellipseIn: rect)
-                        let color = clusterColors[abs(item.cluster) % clusterColors.count]
-                        
-                        let isHighlighted = searchResults.keys.contains(item.id)
-                        let opacity = searchResults.isEmpty ? 0.8 : (isHighlighted ? 1.0 : 0.2)
-                        let highlightGlow = isHighlighted ? 2.0 : 0.0
-                        
-                        context.fill(path, with: .color(color.opacity(opacity)))
-                        context.stroke(path, with: .color(.white.opacity(isHighlighted ? 1.0 : 0.5)), lineWidth: 1 + highlightGlow)
+        NavigationStack {
+            List {
+                searchResultsList
+            }
+            .listStyle(InsetGroupedListStyle())
+            .navigationTitle("Search")
+            .searchable(text: $query, prompt: "Explore your data semantically...")
+            .onSubmit(of: .search) {
+                Task { await performSearch() }
+            }
+            .onChange(of: query) { newValue in
+                if newValue.isEmpty {
+                    withAnimation { searchResults.removeAll() }
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: {
+                        isShowing3DCanvas = true
+                    }) {
+                        Image(systemName: "cube.transparent")
+                            .foregroundColor(.purple)
                     }
                 }
-                .drawingGroup()
-                .gesture(
-                    SpatialTapGesture()
-                        .onEnded { value in
-                            // Very basic collision detection for MVP point hover/preview
-                            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-                            let tapX = (value.location.x - center.x) / scale
-                            let tapY = (value.location.y - center.y) / scale
-                            
-                            if let tapped = items.first(where: { abs($0.x - tapX) < 10 && abs($0.y - tapY) < 10 }) {
-                                withAnimation { selectedItem = tapped }
-                            } else {
-                                withAnimation { selectedItem = nil }
-                            }
-                        }
-                )
-            }
-            .ignoresSafeArea()
-            
-            // ─── 2. Overlay UI ───
-            VStack {
-                // Header & Indexing Controls
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading) {
-                        Text("VectorLens")
-                            .font(.custom("Inter-Bold", size: 24, relativeTo: .title))
-                            .fontWeight(.heavy)
-                            .foregroundColor(.white)
-                            .shadow(color: .purple.opacity(0.5), radius: 10, x: 0, y: 0)
-                    }
-                    
-                    Spacer()
-                    
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: startIndexing) {
-                        HStack(spacing: 5) {
+                        if isIndexing {
+                            ProgressView()
+                        } else {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                                .rotationEffect(.degrees(isIndexing ? 360 : 0))
-                                .animation(isIndexing ? Animation.linear(duration: 1).repeatForever(autoreverses: false) : .default, value: isIndexing)
-                            Text("Scan Device")
-                                .font(.caption).bold()
                         }
-                        .foregroundColor(isIndexing ? .gray : .white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial)
-                        .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
-                        .clipShape(Capsule())
                     }
                     .disabled(isIndexing)
                 }
-                .padding()
-                
-                Spacer()
-                
-                // Item Preview Overlay
-                if let selected = selectedItem {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text(selected.type.capitalized)
-                                .font(.caption).bold()
-                                .foregroundColor(clusterColors[abs(selected.cluster) % clusterColors.count])
-                            Spacer()
-                            Button(action: { withAnimation { selectedItem = nil } }) {
-                                Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
-                            }
-                        }
-                        Text(selected.contentText)
-                            .font(.subheadline)
-                            .foregroundColor(.white)
-                            .lineLimit(4)
-                    }
-                    .padding()
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(16)
-                    .padding(.horizontal)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                }
-                
-                // Natural Language Search Bar
-                HStack {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(.purple)
-                    
-                    TextField("Explore your data semantically...", text: $query)
-                        .foregroundColor(.white)
-                        .font(.subheadline)
-                        .onSubmit { Task { await performSearch() } }
-                    
-                    if !searchResults.isEmpty {
-                        Button(action: {
-                            withAnimation {
-                                query = ""
-                                searchResults.removeAll()
-                            }
-                        }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.gray)
-                        }
-                    } else {
-                        Button(action: { Task { await performSearch() } }) {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .foregroundColor(query.isEmpty ? .gray : .purple)
-                                .font(.system(size: 28))
-                        }
-                        .disabled(query.isEmpty)
-                    }
-                }
-                .padding()
-                .background(
-                    RoundedRectangle(cornerRadius: 30)
-                        .fill(.ultraThinMaterial)
-                        .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 5)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 30)
-                        .stroke(
-                            LinearGradient(
-                                colors: [.purple.opacity(0.5), .blue.opacity(0.3), .clear],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1.5
-                        )
-                )
-                .padding(.horizontal)
-                .padding(.bottom, 30)
             }
-            
-            // ─── 3. Global Loading Overlay ───
-            if isIndexing {
-                ZStack {
-                    Color.black.opacity(0.6).ignoresSafeArea()
-                    
-                    VStack(spacing: 20) {
-                        ProgressView()
-                            .scaleEffect(1.5)
-                            .progressViewStyle(CircularProgressViewStyle(tint: .purple))
-                        
-                        Text(indexingStatus)
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                            
-                        Text(String(format: "%.0f%%", progress * 100))
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                    .padding(40)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 30))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 30)
-                            .stroke(
-                                LinearGradient(colors: [.purple, .clear, .blue], startPoint: .topLeading, endPoint: .bottomTrailing),
-                                lineWidth: 2
-                            )
-                    )
-                    .shadow(color: .purple.opacity(0.4), radius: 30)
-                }
-                .transition(.opacity.combined(with: .scale))
+            .navigationDestination(isPresented: $isShowing3DCanvas) {
+                VectorCanvasView(items: $items, searchResults: $searchResults, clusterColors: clusterColors)
             }
+            .overlay(
+                Group {
+                    if isIndexing {
+                        loadingOverlay
+                    }
+                }
+            )
         }
         .onAppear {
             initializeBackend()
         }
     }
     
-    // ─── 3. Backend Integration ───
+    @ViewBuilder
+    private var searchResultsList: some View {
+        if !searchResults.isEmpty {
+            Section(header: Text("Semantic Matches")) {
+                ForEach(searchResults.sorted(by: { $0.value > $1.value }), id: \.key) { result in
+                    if let item = items.first(where: { $0.id == result.key }) {
+                        SearchResultRow(item: item, score: result.value, color: clusterColors[abs(item.cluster) % clusterColors.count])
+                    }
+                }
+            }
+        } else if !items.isEmpty {
+            Section(header: Text("Recent Index (\(items.count) items)")) {
+                ForEach(items.prefix(100)) { item in
+                    SearchResultRow(item: item, score: nil, color: clusterColors[abs(item.cluster) % clusterColors.count])
+                }
+            }
+        } else {
+            Section {
+                Text("Index empty. Hit Scan Device.")
+                    .foregroundColor(.gray)
+                    .italic()
+            }
+        }
+    }
     
+    var loadingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.8).ignoresSafeArea()
+            VStack(spacing: 20) {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+                
+                Text(indexingStatus)
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    
+                Text(String(format: "%.0f%%", progress * 100))
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+            .padding(40)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 30))
+            .shadow(color: .purple.opacity(0.4), radius: 30)
+        }
+        .transition(.opacity.combined(with: .scale))
+    }
+    
+    // ─── Backend Integration ───
     private func initializeBackend() {
-        // Load SlipStream embedding model and SQLite DB
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // In a real device app, model is bundled or downloaded to documents path
                 let modelPath = Bundle.main.path(forResource: "nomic-embed-text-v1.5-q4_k_m", ofType: "gguf") ?? "/tmp/model.gguf"
                 let textEngine = try SlipStreamModel(path: modelPath)
                 let unifiedEngine = LocalMotimodelEngine(textEngine: textEngine)
@@ -251,7 +156,6 @@ struct ContentView: View {
     
     private func startIndexing() {
         guard let pipeline = pipeline, !isIndexing else { return }
-        
         withAnimation { isIndexing = true }
         
         Task {
@@ -262,12 +166,10 @@ struct ContentView: View {
                 }
             }
             
-            // Re-fetch items from DB
             DispatchQueue.main.async {
                 self.items = self.db?.getAllItems() ?? []
             }
             
-            // Run Projection Clustering
             var localItems = self.items
             await ProjectionLayer.clusterAndProject(items: &localItems, iterations: 150)
             
@@ -275,9 +177,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 self.items = finalItems
                 self.db?.updateItemsCache(self.items)
-                withAnimation { 
-                    self.isIndexing = false 
-                }
+                withAnimation { self.isIndexing = false }
             }
         }
     }
@@ -287,25 +187,135 @@ struct ContentView: View {
         
         do {
             let qVector = try await embedder.embed(text: query)
-            let results = db.search(queryEmbedding: qVector, topK: 5)
+            let results = db.search(queryEmbedding: qVector, topK: 15)
             
             DispatchQueue.main.async {
                 withAnimation {
                     self.searchResults.removeAll()
                     for r in results {
-                        if r.score > 0.4 { // Threshold
+                        if r.score > 0.4 {
                             self.searchResults[r.item.id] = r.score
                         }
-                    }
-                    
-                    // Show top hit immediately
-                    if let top = results.first?.item {
-                        self.selectedItem = top
                     }
                 }
             }
         } catch {
             print("Search error: \(error)")
         }
+    }
+}
+
+// ─── Subviews ───
+
+struct SearchResultRow: View {
+    let item: PhoneItemMeta
+    let score: Float?
+    let color: Color
+    
+    var iconName: String {
+        switch item.type.lowercased() {
+        case "photo": return "photo.fill"
+        case "contact": return "person.crop.circle.fill"
+        case "app": return "app.badge.fill"
+        case "file": return "doc.text.fill"
+        default: return "doc.fill"
+        }
+    }
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 15) {
+            Image(systemName: iconName)
+                .font(.title2)
+                .foregroundColor(color)
+                .frame(width: 30)
+            
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.type.capitalized)
+                    .font(.caption)
+                    .bold()
+                    .foregroundColor(.secondary)
+                
+                Text(item.contentText)
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+                    .lineLimit(3)
+            }
+            
+            Spacer()
+            
+            if let s = score {
+                Text(String(format: "%.0f%%", s * 100))
+                    .font(.caption2)
+                    .bold()
+                    .padding(5)
+                    .background(Color.green.opacity(0.2))
+                    .foregroundColor(.green)
+                    .cornerRadius(5)
+            }
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+struct VectorCanvasView: View {
+    @Binding var items: [PhoneItemMeta]
+    @Binding var searchResults: [String: Float]
+    let clusterColors: [Color]
+    
+    @State private var selectedItem: PhoneItemMeta?
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            GeometryReader { geo in
+                let scale = min(geo.size.width, geo.size.height) / 100.0
+                
+                Canvas { context, size in
+                    context.translateBy(x: size.width / 2, y: size.height / 2)
+                    
+                    for item in items {
+                        let rect = CGRect(x: item.x * scale, y: item.y * scale, width: 16, height: 16)
+                        let path = Path(ellipseIn: rect)
+                        let color = clusterColors[abs(item.cluster) % clusterColors.count]
+                        
+                        let isHighlighted = searchResults.keys.contains(item.id)
+                        let opacity = searchResults.isEmpty ? 0.8 : (isHighlighted ? 1.0 : 0.2)
+                        let highlightGlow = isHighlighted ? 2.0 : 0.0
+                        
+                        context.fill(path, with: .color(color.opacity(opacity)))
+                        context.stroke(path, with: .color(.white.opacity(isHighlighted ? 1.0 : 0.5)), lineWidth: 1 + highlightGlow)
+                    }
+                }
+                .drawingGroup()
+                .gesture(
+                    SpatialTapGesture().onEnded { value in
+                        let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                        let tapX = (value.location.x - center.x) / scale
+                        let tapY = (value.location.y - center.y) / scale
+                        
+                        if let tapped = items.first(where: { abs($0.x - tapX) < 10 && abs($0.y - tapY) < 10 }) {
+                            withAnimation { selectedItem = tapped }
+                        } else {
+                            withAnimation { selectedItem = nil }
+                        }
+                    }
+                )
+            }
+            
+            if let selected = selectedItem {
+                VStack {
+                    Spacer()
+                    SearchResultRow(item: selected, score: searchResults[selected.id], color: clusterColors[abs(selected.cluster) % clusterColors.count])
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(16)
+                        .padding()
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .navigationTitle("3D Vector Map")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
